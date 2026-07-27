@@ -232,17 +232,36 @@ def parse_garuda_detail_page(html: str, detail_url: str) -> dict[str, Any]:
     return article
 
 
+GARUDA_SEARCH_FIELDS = {"title", "abstract", "author", "doi"}
+
+
 async def fetch_garuda_search_page(
     client: httpx.AsyncClient,
     query: str,
     page: int = 1,
+    select: str = "",
+    publisher: str = "",
+    pdf_only: bool = False,
+    year_from: int | None = None,
+    year_to: int | None = None,
 ) -> str:
+    params: dict[str, Any] = {
+        "q": query,
+        "page": page,
+        "select": select,
+    }
+    if publisher:
+        params["pub"] = publisher
+    if pdf_only:
+        params["pdf"] = 1
+    if year_from is not None:
+        params["from"] = year_from
+    if year_to is not None:
+        params["to"] = year_to
+
     response = await client.get(
         f"{GARUDA_BASE_URL}/documents",
-        params={
-            "q": query,
-            "page": page,
-        },
+        params=params,
     )
     response.raise_for_status()
     return response.text
@@ -261,6 +280,11 @@ async def fetch_garuda_detail_page(
 @mcp.tool()
 async def search_garuda(
     query: str,
+    search_field: str = "",
+    publisher: str = "",
+    pdf_only: bool = False,
+    year_from: int | None = None,
+    year_to: int | None = None,
     limit: int = 10,
     max_pages: int = 3,
     include_abstract: bool = True,
@@ -270,7 +294,15 @@ async def search_garuda(
     Search Indonesian local journals and articles from GARUDA.
 
     Args:
-        query: Search query
+        query: Search query (min. 3 characters, required by GARUDA)
+        search_field: Which field to match query against: "title", "abstract",
+            "author", or "doi". Leave empty for GARUDA's default (title/abstract).
+            Use "author" to search by author name (e.g. exact author lookups
+            that plain keyword search won't reliably surface).
+        publisher: Optional publisher name filter (min. 3 characters)
+        pdf_only: If true, only return results with a downloadable PDF
+        year_from: Optional lower bound (inclusive) of publication year
+        year_to: Optional upper bound (inclusive) of publication year
         limit: Maximum number of results to return
         max_pages: Maximum number of result pages to scan
         include_abstract: Whether to include abstract text in the output
@@ -282,6 +314,13 @@ async def search_garuda(
     limit = max(1, min(limit, 50))
     max_pages = max(1, min(max_pages, 10))
     delay_seconds = max(0.0, min(delay_seconds, 5.0))
+
+    search_field = search_field.strip().lower()
+    if search_field and search_field not in GARUDA_SEARCH_FIELDS:
+        raise ValueError(
+            f"search_field must be one of {sorted(GARUDA_SEARCH_FIELDS)} or empty, "
+            f"got {search_field!r}"
+        )
 
     headers = {
         "User-Agent": "Mozilla/5.0 mcp-garuda/0.1",
@@ -297,7 +336,16 @@ async def search_garuda(
         follow_redirects=True,
     ) as client:
         for page in range(1, max_pages + 1):
-            html = await fetch_garuda_search_page(client, query=query, page=page)
+            html = await fetch_garuda_search_page(
+                client,
+                query=query,
+                page=page,
+                select=search_field,
+                publisher=publisher,
+                pdf_only=pdf_only,
+                year_from=year_from,
+                year_to=year_to,
+            )
             parsed = parse_garuda_search_page(html)
 
             if total_documents is None:
@@ -318,6 +366,7 @@ async def search_garuda(
 
     return {
         "query": query,
+        "search_field": search_field or "default",
         "source": "GARUDA",
         "source_url": GARUDA_BASE_URL,
         "total_documents": total_documents,
