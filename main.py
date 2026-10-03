@@ -37,6 +37,39 @@ def build_garuda_detail_url(garuda_id_or_url: str) -> str:
     return f"{GARUDA_BASE_URL}/documents/detail/{garuda_id_or_url}"
 
 
+GARUDA_DOI_PATTERN = re.compile(r"10\.\d{4,9}/[^\s\"'<>]+")
+GARUDA_YEAR_PATTERN = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def extract_doi(value: str) -> str:
+    match = GARUDA_DOI_PATTERN.search(value or "")
+    return match.group(0).rstrip(".,;)") if match else ""
+
+
+def extract_year(value: str) -> int | None:
+    # Journal issue strings look like "Vol. 27 No. 1 (2026): January"; prefer the parenthesised year
+    match = re.search(r"\((\d{4})\)", value or "")
+    if match:
+        return int(match.group(1))
+    match = GARUDA_YEAR_PATTERN.search(value or "")
+    return int(match.group(0)) if match else None
+
+
+def classify_garuda_link(text: str, href: str) -> str:
+    """Identify an action link by its target first (stable) and its label second (layout-dependent)."""
+    if "doi.org/" in href or text.startswith("DOI:"):
+        return "doi"
+    if "scholar.google." in href or "Google Scholar" in text:
+        return "google_scholar"
+    if "Download Original" in text:
+        return "download_original"
+    if "Original Source" in text:
+        return "original_source"
+    if "Full PDF" in text:
+        return "full_pdf"
+    return ""
+
+
 def format_simple_apa_citation(article: dict[str, Any]) -> str:
     authors = article.get("authors", [])
     journal = article.get("journal") or "Unknown journal"
@@ -87,27 +120,31 @@ def parse_garuda_article_item(item, base_url: str = GARUDA_BASE_URL) -> dict[str
     for link in links:
         text = clean_text(link.get_text(" ", strip=True))
         href = link.get("href", "")
+        kind = classify_garuda_link(text, href)
 
-        if "Download Original" in text:
-            download_original = href
-        elif "Original Source" in text:
-            original_source = href
-        elif "Check in Google Scholar" in text:
+        if kind == "doi":
+            doi = doi or extract_doi(href) or extract_doi(text)
+        elif kind == "google_scholar":
             google_scholar = href
-        elif "Full PDF" in text:
+        elif kind == "download_original":
+            download_original = href
+        elif kind == "original_source":
+            original_source = href
+        elif kind == "full_pdf":
             full_pdf = href
-        elif "DOI:" in text:
-            doi = text.replace("DOI:", "").strip()
 
     article = {
+        "source": "garuda",
         "garuda_id": garuda_id,
         "title": title,
         "authors": authors,
         "authors_text": "; ".join(authors),
+        "year": extract_year(journal),
         "journal": journal,
         "publisher": publisher,
         "abstract": abstract,
         "doi": doi,
+        "url": detail_url,
         "detail_url": detail_url,
         "download_original": download_original,
         "original_source": original_source,
@@ -194,16 +231,17 @@ def parse_garuda_detail_page(html: str, detail_url: str) -> dict[str, Any]:
     for link in soup.select("a[href]"):
         text = clean_text(link.get_text(" ", strip=True))
         href = link.get("href", "")
-        if "Download Original" in text:
-            download_original = href
-        elif "Check in Google Scholar" in text or "Google Scholar" in text:
+        kind = classify_garuda_link(text, href)
+        if kind == "doi":
+            doi = doi or extract_doi(href) or extract_doi(text)
+        elif kind == "google_scholar":
             google_scholar = href
-        elif "Original Source" in text:
+        elif kind == "download_original":
+            download_original = href
+        elif kind == "original_source":
             original_source = href
-        elif "Full PDF" in text:
+        elif kind == "full_pdf":
             full_pdf = href
-        elif "DOI:" in text:
-            doi = text.replace("DOI:", "").strip()
 
     copyright_text = ""
     paragraphs = article_display.select("div.art-content p")
@@ -211,7 +249,9 @@ def parse_garuda_detail_page(html: str, detail_url: str) -> dict[str, Any]:
         copyright_text = clean_text(paragraphs[-1].get_text(" ", strip=True))
 
     article = {
+        "source": "garuda",
         "garuda_id": extract_garuda_id_from_url(detail_url),
+        "url": detail_url,
         "detail_url": detail_url,
         "title": title,
         "journal_short": journal_short,
@@ -220,6 +260,7 @@ def parse_garuda_detail_page(html: str, detail_url: str) -> dict[str, Any]:
         "authors": authors,
         "authors_text": "; ".join(authors),
         "publish_date": publish_date,
+        "year": extract_year(publish_date) or extract_year(journal_volume),
         "abstract": abstract,
         "copyright": copyright_text,
         "doi": doi,
